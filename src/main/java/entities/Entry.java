@@ -1,3 +1,5 @@
+package entities;
+
 import org.json.JSONObject;
 
 public class Entry {

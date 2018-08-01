@@ -1,7 +1,10 @@
+package mongo;
+
 import com.mongodb.MongoClient;
 import com.mongodb.MongoWriteException;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import entities.Entry;
 import net.dv8tion.jda.core.entities.User;
 import org.bson.Document;
 import org.json.JSONObject;
@@ -44,17 +47,17 @@ public class WordCollection {
      * and which people are monitoring that word, and attempts to add the server ID and user ID to the watchlist.
      * @param serverID String representing the server's ID
      * @param user The User who would like to be notified when these words are said
-     * @param words String(s) containing the words to add to the database.
+     * @param sentence String containing the word(s) to add to the database.
      */
 
     @SuppressWarnings("unchecked")
-    public void addWords(String serverID, User user, String... words){
+    public void addWords(String serverID, User user, String sentence){
 
         String userId = user.getId();
         if( findDocByUserId(userId) == null)
             addUser(user);
 
-        for (String word: words) {
+        for (String word: formatString(sentence) ) {
             Document doc = findDocByWord(word);
 
             //Create document for word being added and insert it if it didn't already exist
@@ -68,15 +71,15 @@ public class WordCollection {
 
             //If there is a nested document for the server
             if (map.containsKey(serverID)){
-                Document nested = map.get(serverID);
-                ArrayList<String> users = (ArrayList<String>) nested.get("users");
+                Document serverDoc = map.get(serverID);
+                ArrayList<String> users = (ArrayList<String>) serverDoc.get("users");
 
                 //User is already monitoring this word, attempt to add next word
                 if (users.contains(userId))
                     continue;
 
                 users.add(userId);
-                wordCollection.updateOne(eq("_id", word), pull("servers", nested));
+                wordCollection.updateOne(eq("_id", word), pull("servers", serverDoc));
                 wordCollection.updateOne(eq("_id", word), addToSet("servers",
                         new Document("_id", serverID).append("users", users)));
             }
@@ -204,28 +207,86 @@ public class WordCollection {
         return map;
     }
 
-    //THIS NEEDS TO BE CHANGED TO REFLECT NEW SCHEMA
+
+    /**
+     * Gets all the words monitored by a user and returns them as a String.
+     * @param serverID The ID of the server the get command was said in.
+     * @param userID The ID of the user who requested their watched words.
+     * @return A String containing the words being watched by the user.
+     */
+
     public String getMonitoredWords(String serverID, String userID){
         StringBuilder builder = new StringBuilder();
 
-        Document main = wordCollection.find( eq("_id", serverID)).first();
-        if (main == null)
-            return null;
+        Document filter = new Document("servers._id", serverID)
+                .append("servers.users", userID);
 
-        for (Document doc: getWordDocs(main)){
-            ArrayList<String> users = (ArrayList<String>)doc.get("users");
-            if (users.contains(userID)) {
-                builder.append(doc.getString("_id"));
-                builder.append(" ");
-            }
+        for(Document doc: wordCollection.find( filter ) ) {
+            String word = doc.getString("_id");
+            builder.append(word)
+                    .append(" ");
         }
 
         return builder.toString();
     }
 
-    //TO BE REMOVED/CHANGED TO REFLECT NEW SCHEMA
+    /**
+     * Attempts to remove the user from the watchlist of all the words in the passed sentence.
+     * @param serverID The ID of the server the remove command was issued on.
+     * @param userId The ID of the user who issued the remove command.
+     * @param sentence The sentence containing words to attempt to remove.
+     * @return A String containing any words that were successfully removed.
+     */
+
     @SuppressWarnings("unchecked")
-    private static List<Document> getWordDocs(Document doc){
-        return (List<Document>) doc.get("words");
+    public String removeWords(String serverID, String userId, String sentence){
+
+        StringBuilder builder = new StringBuilder();
+
+        for(String word: formatString(sentence) ){
+            Document doc = findDocByWord(word);
+
+            //Word is not being monitored, check rest of sentence
+            if (doc == null)
+                continue;
+
+            builder.append(word).append(" ");
+
+            HashMap<String, Document> servers = getServerMap(doc);
+            if (servers.containsKey(serverID)){
+                Document serverDoc = servers.get(serverID);
+                ArrayList<String> users = (ArrayList<String>) serverDoc.get("users");
+
+                if (users.contains(userId)){
+
+                    //There is more than one user monitoring the current word, so only remove the person who requested
+                    //the word to be removed from their watchlist
+                    if (users.size() > 1){
+                        users.remove(userId);
+                        wordCollection.updateOne(eq("_id", word), pull("servers", serverDoc));
+                        wordCollection.updateOne(eq("_id", word), addToSet("servers",
+                                new Document("_id", serverID).append("users", users)));
+                    }
+
+                    //There is only one user monitoring the current word
+                    else {
+
+                        //Only one server is monitoring this word, and on that one server, only one person.
+                        //Document for that word can be deleted safely.
+                        if (servers.size() == 1){
+                            wordCollection.deleteOne(doc);
+                        }
+
+                        //There are other servers monitoring this word, but this server only has one person.
+                        //Remove this server from the word document's server array
+                        else if (servers.size() > 1 ){
+                            wordCollection.updateOne(eq("_id", word), pull("servers", serverDoc));
+                        }
+                    }
+                }
+            }
+        }
+
+        return builder.toString();
     }
 }
